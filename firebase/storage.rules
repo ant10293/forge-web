@@ -1,0 +1,14 @@
+rules_version = '2';
+
+// Not yet deployed: Cloud Storage for Firebase requires the project to be
+// on the Blaze plan, which must be enabled by the project owner in the
+// Firebase console before the default bucket exists. Deny-all until the
+// real public-read (catalog assets) vs. user-scoped (feedback) split is
+// authored in the Firebase backend phase.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
