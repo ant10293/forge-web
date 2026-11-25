@@ -1,18 +1,218 @@
-rules_version='2'
+rules_version = '2';
+
+// ===================================================================
+// Assumed Data Model
+// ===================================================================
+//
+// Collection: users
+// Document ID: {uid} — matches the Firebase Auth uid
+// Fields:
+//   - profile: map (required)
+//       - gender: string, one of ['male','female','notSet'] (required)
+//       - ageYears: number, 0 < x < 130 (required)
+//       - bodyweightKg: number, 0 < x < 500 (required)
+//       - unitSystem: string, one of ['Imperial','Metric'] (required)
+//   - subscriptionStatus: map (optional, absent until subscribed) — IMMUTABLE
+//     from the client. Written only by a trusted server process (a Cloud
+//     Function using the Admin SDK, which bypasses these rules entirely).
+//       - plan: string
+//       - isActive: bool
+//       - currentPeriodEnd: timestamp
+//       - stripeCustomerId: string
+//       - stripeSubscriptionId: string
+//   - createdAt: timestamp (required, immutable, must equal request.time at
+//     creation)
+//
+// Collection: exercises
+// Document ID: {id} — a UUID string, matches forge-core's Exercise.id
+// Public, admin-curated catalog data mirroring forge-core's `InitExercise`
+// Codable shape (nested muscle/instruction/equipment data). Schema evolves
+// client-side as forge-core grows, so only light shape validation is
+// enforced here — access control (public read, admin-only write) is this
+// collection's real security boundary, not deep payload validation.
+// Fields:
+//   - name: string, 0 < length < 200 (required)
+//   - (many other nested fields from InitExercise — not individually
+//     validated; see note above)
+//
+// Collection: equipment
+// Document ID: {id} — a UUID string, matches forge-core's GymEquipment.id
+// Same treatment as `exercises` (mirrors `InitEquipment`).
+// Fields:
+//   - name: string, 0 < length < 200 (required)
+//   - (many other nested fields from InitEquipment — not individually
+//     validated; see note above)
+//
+// Collection: catalog
+// Document ID: "meta" (singleton)
+// Fields:
+//   - exerciseVersion: number, >= 0 (required)
+//   - equipmentVersion: number, >= 0 (required)
+//
+// Collection: referralCodes
+// Document ID: {code} — the referral code string itself
+// Schema exists ahead of the full affiliate system (not built yet). All
+// writes happen server-side via Cloud Functions (Admin SDK).
+// Fields:
+//   - ownerUid: string (required)
+//   - createdAt: timestamp (required)
+//   - active: bool (required)
+//
+// Collection: affiliateAccounts
+// Document ID: {uid} — matches the Firebase Auth uid of the affiliate
+// Schema exists ahead of the full affiliate system (not built yet). All
+// writes happen server-side via Cloud Functions (Admin SDK).
+// Fields:
+//   - stripeConnectAccountId: string (optional)
+//   - totalReferred: number, >= 0 (required)
+//   - totalEarned: number, >= 0 (required)
+//   - payoutThreshold: number, >= 0 (required)
+//
+// ===================================================================
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      // This rule allows anyone with your database reference to view, edit,
-      // and delete all data in your database. It is useful for getting
-      // started, but it is configured to expire after 30 days because it
-      // leaves your app open to attackers. At that time, all client
-      // requests to your database will be denied.
-      //
-      // Make sure to write security rules for your app before that time, or
-      // else all client requests to your database will be denied until you
-      // update your rules.
-      allow read, write: if request.time < timestamp.date(2026, 12, 25);
+
+    // =================================================================
+    // Helper Functions
+    // =================================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
     }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Admin status lives ONLY in a custom auth claim, never in a stored
+    // document field a client could write to itself. No mechanism grants
+    // this claim yet (the admin console is future work) — this assumes a
+    // trusted server-side process will set it.
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.admin == true;
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // =================================================================
+    // Domain Validators (used in BOTH create and update, per directive)
+    // =================================================================
+
+    function isValidProfile(profile) {
+      return profile is map &&
+        profile.keys().hasOnly(['gender', 'ageYears', 'bodyweightKg', 'unitSystem']) &&
+        profile.gender is string && profile.gender in ['male', 'female', 'notSet'] &&
+        profile.ageYears is number && profile.ageYears > 0 && profile.ageYears < 130 &&
+        profile.bodyweightKg is number && profile.bodyweightKg > 0 && profile.bodyweightKg < 500 &&
+        profile.unitSystem is string && profile.unitSystem in ['Imperial', 'Metric'];
+    }
+
+    function isValidUserCreate(data) {
+      // subscriptionStatus is deliberately NOT in this allow-list: a client
+      // can never set it, even to null, at creation time.
+      return hasOnlyAllowedFields(['profile', 'createdAt']) &&
+        isValidProfile(data.profile) &&
+        data.createdAt is timestamp &&
+        data.createdAt == request.time;
+    }
+
+    function isValidUserUpdate(data) {
+      return hasOnlyAllowedFields(['profile', 'subscriptionStatus', 'createdAt']) &&
+        isValidProfile(data.profile) &&
+        data.createdAt == resource.data.createdAt &&
+        subscriptionStatusUnchanged();
+    }
+
+    // The single most important rule in this file: a client update can
+    // never create, modify, or clear subscriptionStatus, even to a value
+    // that happens to match reality. Only a server-side Cloud Function
+    // (Admin SDK, bypasses rules) may ever touch this field.
+    function subscriptionStatusUnchanged() {
+      return ('subscriptionStatus' in request.resource.data) == ('subscriptionStatus' in resource.data) &&
+        (!('subscriptionStatus' in resource.data) ||
+          request.resource.data.subscriptionStatus == resource.data.subscriptionStatus);
+    }
+
+    function isBasicCatalogItem(data) {
+      return data is map &&
+        data.name is string && data.name.size() > 0 && data.name.size() < 200;
+    }
+
+    function isValidCatalogMeta(data) {
+      return hasOnlyAllowedFields(['exerciseVersion', 'equipmentVersion']) &&
+        data.exerciseVersion is number && data.exerciseVersion >= 0 &&
+        data.equipmentVersion is number && data.equipmentVersion >= 0;
+    }
+
+    // =================================================================
+    // users/{uid}
+    // =================================================================
+    // Contains PII-adjacent profile data (age, bodyweight) — never
+    // readable by anyone but the owner. No field in this document can
+    // ever express an elevated role, so there is no privilege-escalation
+    // surface here even though writes are otherwise owner-permissive.
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid) && isValidUserCreate(request.resource.data);
+      allow update: if isOwner(uid) && isValidUserUpdate(request.resource.data);
+      allow delete: if false; // account deletion needs a dedicated flow, not yet built
+    }
+
+    // =================================================================
+    // exercises/{id} and equipment/{id}
+    // =================================================================
+    // Deliberately public-read per the architecture plan ("public-read,
+    // admin-write catalog pattern") — this is non-sensitive content also
+    // served to the marketing site, not user data.
+
+    match /exercises/{id} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isBasicCatalogItem(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /equipment/{id} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isBasicCatalogItem(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /catalog/meta {
+      allow read: if true;
+      allow create, update: if isAdmin() && isValidCatalogMeta(request.resource.data);
+      allow delete: if false;
+    }
+
+    // =================================================================
+    // referralCodes/{code}
+    // =================================================================
+    // Affiliate system schema, ahead of the system itself. Any signed-in
+    // user may read a code to validate it at signup; all writes are
+    // server-only (Cloud Functions, Admin SDK) — a client can never mint,
+    // claim, or deactivate a code directly.
+
+    match /referralCodes/{code} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
+    // =================================================================
+    // affiliateAccounts/{uid}
+    // =================================================================
+    // Affiliate earnings/payout tracking, ahead of the system itself. Only
+    // the owning affiliate may read their own numbers; all writes are
+    // server-only (Cloud Functions, Admin SDK) — payout math is never
+    // client-trusted.
+
+    match /affiliateAccounts/{uid} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    // No catch-all rule: anything not matched above is denied by default.
   }
 }
