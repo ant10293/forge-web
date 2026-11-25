@@ -1,0 +1,62 @@
+.account-page {
+  display: flex;
+  justify-content: center;
+  padding: 64px 0 80px;
+}
+
+.account-card {
+  width: min(560px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  border-radius: var(--radius-lg);
+  padding: 32px;
+}
+
+.account-card .subtitle {
+  margin-bottom: 20px;
+}
+
+.account-section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.account-section h2 {
+  font-size: 1.1rem;
+}
+
+.sub-status {
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sub-status strong {
+  color: var(--text);
+}
+
+.sub-status span {
+  color: var(--muted-soft);
+  font-size: 0.9rem;
+}
+
+.sub-active {
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.22);
+}
+
+.sub-inactive {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.coming-soon-note {
+  margin-top: 8px;
+  font-size: 0.82rem;
+  color: var(--muted-soft);
+}
